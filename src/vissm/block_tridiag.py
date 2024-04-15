@@ -81,7 +81,7 @@ def btp_entropy(diag_blocks):
     """
     n_blocks, n = diag_blocks.shape[:2]
     def scan_fun(half_det, diag_block):
-        half_det -= jnp.sum(jnp.log(jnp.diag(diag_block)))
+        half_det -= jnp.sum(jnp.log(jnp.abs(jnp.diag(diag_block))))
         return half_det, None
 
     half_det, _ = jax.lax.scan(scan_fun, 0.0, diag_blocks)
@@ -130,7 +130,7 @@ def btp_logpdf(x, lower_blocks, diag_blocks):
         diag_block = args["diag_block"]
         half = vec.T.dot(diag_block) + vec_next.T.dot(lower_block)
         logpdf -= 0.5*(half.dot(half.T))
-        logpdf += jnp.sum(jnp.log(jnp.diag(diag_block)))
+        logpdf += jnp.sum(jnp.log(jnp.abs(jnp.diag(diag_block))))
         return logpdf, logpdf
     
     scan_init = {

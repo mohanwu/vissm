@@ -25,7 +25,7 @@ def vec_multivariate_normal_logpdf(x, mean, chol):
     
     inv_prod = jnp.sum(jax.vmap(inv_each)(jnp.arange(n)))*0.5
     const = d*jnp.log(2*jnp.pi)
-    det = 2*jnp.sum(jnp.log(jnp.diag(chol)))
+    det = 2*jnp.sum(jnp.log(jnp.abs(jnp.diag(chol))))
     return -0.5*n*(const + det) - inv_prod
 
 # Kalman posterior 
