@@ -40,7 +40,7 @@ class ArcherModel:
         diag_out = jax.vmap(diag_model)(obs_theta)
         diag_chol = diag_chol.at[upper_ind].set(diag_out.T) 
         diag_ind = jnp.diag_indices(self._n_state)
-        diag_chol = diag_chol.at[diag_ind].set(jnp.abs(diag_chol[diag_ind])).T + jnp.eye(self._n_state)
+        diag_chol = diag_chol.at[diag_ind].set(jax.nn.softplus(diag_chol[diag_ind])).T + jnp.eye(self._n_state)
         return mean, lower_chol, diag_chol
 
     def simulate(self, key, params, y_meas):
@@ -50,6 +50,7 @@ class ArcherModel:
         theta_mu = params["theta_mu"]
         n_theta = len(theta_mu)
         theta_chol = theta_to_chol(params["theta_chol"], n_theta)
+        theta_chol = theta_chol.at[jnp.diag_indices(n_theta)].set(jax.nn.softplus(jnp.diag(theta_chol)))
         random_normal = jax.random.normal(subkey, shape=(n_theta,))
         theta = theta_mu + theta_chol.dot(random_normal)
         theta_rep = jnp.repeat(theta[None], self._n_sde, axis=0)
@@ -60,7 +61,7 @@ class ArcherModel:
         # use entropy for - E[log q(theta)]
         # use negative logpdf for - E[log q(x|theta)]
         x_neglogpdf = -btp_logpdf(x-mean, lower_chol, diag_chol)
-        theta_entpy = 0.5*n_theta*(1+jnp.log(2*jnp.pi)) + jnp.sum(jnp.log(jnp.abs(jnp.diag(theta_chol))))
+        theta_entpy = 0.5*n_theta*(1+jnp.log(2*jnp.pi)) + jnp.sum(jnp.log(jnp.diag(theta_chol)))
         theta_x_neglogpdf = x_neglogpdf + theta_entpy
         return (x, theta), theta_x_neglogpdf
     
@@ -86,20 +87,25 @@ class SmoothModel:
     These values are then used to compute ``(mu_{n+1|n}, Sigma_{n+1|n})``.
     Finally, simulation is done using Kalman recursions.
     """
-    def __init__(self, n_state, n_res):
+    def __init__(self, n_state, n_res, x_init):
         self._n_state = n_state
         self._n_res = n_res
-
+        self._x_init = x_init
 
     def _y_meas_comb(self, y_meas):
         n_obs = len(y_meas)
         time = jnp.tile(jnp.arange(self._n_res), reps=n_obs-1)
         time = jnp.append(time, 0)
         self._n_sde = len(time)
+        # y_meas_curr = jnp.repeat(y_meas[:-1], repeats=self._n_res, axis=0)
+        # y_meas_curr = jnp.vstack([y_meas_curr, y_meas[-1]])
+        # y_meas_next = jnp.repeat(y_meas[1:], repeats=self._n_res, axis=0)
+        # y_meas_next = jnp.vstack([y_meas[0], y_meas_next])
         y_meas_last = jnp.append(y_meas[-1], y_meas[-1])
         y_meas_comb = jnp.hstack([y_meas[:-1], y_meas[1:]])
         y_meas_comb = jnp.repeat(y_meas_comb, repeats=self._n_res, axis=0)
         y_meas_comb = jnp.vstack([y_meas_comb, y_meas_last])
+        # y_meas_comb = jnp.hstack([y_meas_curr, y_meas_next])
         y_meas_final = jnp.hstack([y_meas_comb, time[:, None]])
         return y_meas_final
 
@@ -112,10 +118,13 @@ class SmoothModel:
         mean_state = full_par[:, par_indices[0]:par_indices[1]]
         wgt_state = full_par[:, par_indices[1]:par_indices[2]].reshape(self._n_sde, self._n_state, self._n_state)
         upper_ind = jnp.triu_indices(self._n_state)
+        diag_ind = jnp.diag_indices(self._n_state)
         chol_state_filt = jnp.zeros((self._n_state, self._n_state, self._n_sde))
-        chol_state_filt = chol_state_filt.at[upper_ind].set(full_par[:, par_indices[2]:par_indices[3]].T).T*0.1
+        chol_state_filt = chol_state_filt.at[upper_ind].set(full_par[:, par_indices[2]:par_indices[3]].T)*0.1
+        chol_state_filt = chol_state_filt.at[diag_ind].set(jax.nn.softplus(chol_state_filt[diag_ind])).T
         chol_state = jnp.zeros((self._n_state, self._n_state, self._n_sde))
-        chol_state = chol_state.at[upper_ind].set(full_par[:, par_indices[3]:par_indices[4]].T).T
+        chol_state = chol_state.at[upper_ind].set(full_par[:, par_indices[3]:par_indices[4]].T)
+        chol_state = chol_state.at[diag_ind].set(jax.nn.softplus(chol_state[diag_ind])).T
         # convert cholesky to variance
         def chol_to_var(chol_mat):
             var_mat = chol_mat.dot(chol_mat.T)
@@ -138,15 +147,20 @@ class SmoothModel:
         key, subkey = jax.random.split(key)
         theta_mu = params["theta_mu"]
         n_theta = len(theta_mu)
-        theta_chol = theta_to_chol(params["theta_chol"], n_theta)
+        # theta_chol = theta_to_chol(params["theta_chol"], n_theta)
+        # theta_chol = theta_chol.at[jnp.diag_indices(n_theta)].set(jax.nn.softplus(jnp.diag(theta_chol)))
+        theta_std = jax.nn.softplus(params["theta_std"])
         random_normal = jax.random.normal(subkey, shape=(n_theta,))
-        theta = theta_mu + theta_chol.dot(random_normal)
+        # theta = theta_mu + theta_chol.dot(random_normal)
+        theta = theta_mu + theta_std*random_normal
+        # theta = jnp.exp(theta)
         theta_rep = jnp.repeat(theta[None], self._n_sde, axis=0)
         obs_theta = jnp.hstack((y_meas, theta_rep))
         mean_state_filt, var_state_filt, \
             mean_state_pred, var_state_pred, \
                 wgt_state = self._par_parse(params, obs_theta)
-        
+        mean_state_filt += self._x_init
+        mean_state_pred += self._x_init
         # simulate using kalman sampler
         def scan_fun(carry, smooth_kwargs):
             mean_state_filt = smooth_kwargs['mean_state_filt']
@@ -203,64 +217,10 @@ class SmoothModel:
         # use entropy for - E[log q(theta)]
         # use negative logpdf for - E[log q(x|theta)]
         x_neglogpdf = last_out["x_neglogpdf"]
-        theta_entpy = 0.5*n_theta*(1+jnp.log(2*jnp.pi)) + jnp.sum(jnp.log(jnp.abs(jnp.diag(theta_chol))))
+        # theta_entpy = 0.5*n_theta*(1+jnp.log(2*jnp.pi)) + jnp.sum(jnp.log(jnp.diag(theta_chol)))
+        theta_entpy = 0.5*n_theta*(1+jnp.log(2*jnp.pi)) + jnp.sum(jnp.log(theta_std))
         theta_x_neglogpdf = x_neglogpdf + theta_entpy
         return (x_state_smooth, theta), theta_x_neglogpdf
-    
-    def post_mv(self, params, y_meas):
-        y_meas = self._y_meas_comb(y_meas)
-        theta = params["theta_mu"]
-        theta_rep = jnp.repeat(theta[None], self._n_sde, axis=0)
-        obs_theta = jnp.hstack((y_meas, theta_rep))
-        mean_state_filt, var_state_filt, \
-            mean_state_pred, var_state_pred, \
-                wgt_state = self._par_parse(params, obs_theta)
-        
-        # compute kalman smoother
-        def scan_fun(carry, smooth_kwargs):
-            mean_state_filt = smooth_kwargs['mean_state_filt']
-            var_state_filt = smooth_kwargs['var_state_filt']
-            mean_state_pred = smooth_kwargs['mean_state_pred']
-            var_state_pred = smooth_kwargs['var_state_pred']
-            wgt_state = smooth_kwargs['wgt_state']
-            mean_state_next = carry['mean_state_next']
-            var_state_next = carry['var_state_next']
-            mean_state_smooth, var_state_smooth = rodeo.kalmantv.smooth_mv(
-                mean_state_next=mean_state_next,
-                var_state_next=var_state_next,
-                mean_state_filt=mean_state_filt,
-                var_state_filt=var_state_filt,
-                mean_state_pred=mean_state_pred,
-                var_state_pred=var_state_pred,
-                wgt_state=wgt_state
-            )
-            carry = {
-                'mean_state_next': mean_state_smooth,
-                'var_state_next': var_state_smooth
-            }
-            return carry, carry
-        
-        scan_init = {
-            'mean_state_next': mean_state_filt[self._n_sde-1],
-            'var_state_next': var_state_filt[self._n_sde-1]
-        }
-        # scan arguments
-        scan_kwargs = {
-            'mean_state_filt': mean_state_filt[:self._n_sde-1],
-            'var_state_filt': var_state_filt[:self._n_sde-1],
-            'mean_state_pred': mean_state_pred[:self._n_sde-1],
-            'var_state_pred': var_state_pred[:self._n_sde-1],
-            'wgt_state': wgt_state[:self._n_sde-1]
-        }
-
-        last_out, stack_out = jax.lax.scan(scan_fun, scan_init, scan_kwargs, reverse=True)
-        mean_state_smooth = jnp.concatenate(
-            [stack_out['mean_state_next'], mean_state_filt[self._n_sde-1][None]]
-        )
-        var_state_smooth = jnp.concatenate(
-            [stack_out['var_state_next'], var_state_filt[self._n_sde-1][None]]
-        )
-        return mean_state_smooth, var_state_smooth
 
 
 class BiRNNModel:
@@ -310,6 +270,7 @@ class BiRNNModel:
         theta_mu = params["theta_mu"]
         n_theta = len(theta_mu)
         theta_chol = theta_to_chol(params["theta_chol"], n_theta)
+        theta_chol = theta_chol.at[jnp.diag_indices(n_theta)].set(jax.nn.softplus(jnp.diag(theta_chol)))
         random_normal = jax.random.normal(subkey, shape=(n_theta,))
         theta = theta_mu + theta_chol.dot(random_normal)
         theta_rep = jnp.repeat(theta[None], self._n_sde, axis=0)
@@ -347,7 +308,7 @@ class BiRNNModel:
         last_out, stack_out = jax.lax.scan(scan_fun, scan_init, scan_kwargs)
         x_state_smooth = stack_out['x_state_next']
         x_neglogpdf = last_out["x_neglogpdf"]
-        theta_entpy = 0.5*n_theta*(1+jnp.log(2*jnp.pi)) + jnp.sum(jnp.log(jnp.abs(jnp.diag(theta_chol))))
+        theta_entpy = 0.5*n_theta*(1+jnp.log(2*jnp.pi)) + jnp.sum(jnp.log(jnp.diag(theta_chol)))
         theta_x_neglogpdf = x_neglogpdf + theta_entpy
         return (x_state_smooth, theta), theta_x_neglogpdf
     
@@ -425,6 +386,7 @@ class SmoothMFModel:
         theta_mu = params["theta_mu"]
         n_theta = len(theta_mu)
         theta_chol = theta_to_chol(params["theta_chol"], n_theta)
+        theta_chol = theta_chol.at[jnp.diag_indices(n_theta)].set(jax.nn.softplus(jnp.diag(theta_chol)))
         random_normal = jax.random.normal(subkey, shape=(n_theta,))
         theta = theta_mu + theta_chol.dot(random_normal)
         theta_rep = jnp.repeat(theta[None], self._n_sde, axis=0)
@@ -495,7 +457,7 @@ class SmoothMFModel:
         # use entropy for - E[log q(theta)]
         # use negative logpdf for - E[log q(x|theta)]
         x_neglogpdf = last_out["x_neglogpdf"]
-        theta_entpy = 0.5*n_theta*(1+jnp.log(2*jnp.pi)) + jnp.sum(jnp.log(jnp.abs(jnp.diag(theta_chol))))
+        theta_entpy = 0.5*n_theta*(1+jnp.log(2*jnp.pi)) + jnp.sum(jnp.log(jnp.diag(theta_chol)))
         theta_x_neglogpdf = x_neglogpdf + theta_entpy
         return (x_state_smooth, theta), theta_x_neglogpdf
     

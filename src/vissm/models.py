@@ -89,23 +89,37 @@ class ArcherModel:
 # Smooth model
 class RNN(eqx.Module):
     hidden_size: int
-    cell: eqx.Module
+    layers: list
+    # cell: eqx.Module
+    # cell2: eqx.Module
     linear: eqx.Module
      
     def __init__(self, key, n_state, n_meas):
-        key1, key2 = jax.random.split(key)
-        self.hidden_size = n_state*(3 + 2*n_state)
-        self.cell = eqx.nn.GRUCell(n_meas, self.hidden_size, key=key1)
-        self.linear = eqx.nn.Linear(self.hidden_size, self.hidden_size, key=key2)
+        key, *subkey = jax.random.split(key, num=6)
+        self.hidden_size = n_state*(3 + 2*n_state)*2
+        self.layers = [
+            eqx.nn.GRUCell(n_meas, self.hidden_size, key=subkey[0]),
+            eqx.nn.GRUCell(self.hidden_size, self.hidden_size, key=subkey[1]),
+            eqx.nn.GRUCell(self.hidden_size, self.hidden_size, key=subkey[2]),
+            eqx.nn.GRUCell(self.hidden_size, self.hidden_size, key=subkey[3]),
+        ]
+        # self.cell = eqx.nn.GRUCell(n_meas, self.hidden_size, key=subkey[0])
+        # self.cell2 = eqx.nn.GRUCell(self.hidden_size, self.hidden_size, key=subkey[1])
+        # self.cell3 = eqx.nn.GRUCell(self.hidden_size, self.hidden_size, key=subkey[2])
+        # self.cell4 = eqx.nn.GRUCell(self.hidden_size, self.hidden_size, key=subkey[3])
+        self.linear = eqx.nn.Linear(self.hidden_size, self.hidden_size, key=subkey[4])
     
+
     # GRU(y_t,h_t) -> h_{t+1}
     def __call__(self, y_meas):
-        hidden = jnp.zeros((self.hidden_size,))
-        def f(carry, inp):
-            return self.cell(inp, carry), self.cell(inp, carry)
-
-        final, full = jax.lax.scan(f, hidden, y_meas)
-        out = jax.vmap(self.linear)(full)
+        hidden = jnp.zeros((len(self.layers), self.hidden_size,))
+        # hidden2 = jnp.zeros((self.hidden_size,))
+        data_seq = y_meas
+        for i in range(len(hidden)):
+            def f(carry, inp):
+                return self.layers[i](inp, carry), self.layers[i](inp, carry)
+            final, data_seq = jax.lax.scan(f, hidden[i], data_seq)
+        out = jax.vmap(self.linear)(data_seq)
         return out
 
 class SmoothModel:
