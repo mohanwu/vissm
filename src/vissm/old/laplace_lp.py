@@ -23,7 +23,6 @@ def laplace_lp(theta, y_meas, x_init, joint_neglogdensity, solver):
     # find \hat x and associated Hessian
     n_seq, n_state = x_init.shape
     x_opt = solver.run(x_init, y_meas, theta).params
-    # x_opt = x_init
     x_hes = jax.hessian(joint_neglogdensity)(x_opt, y_meas, theta).reshape(n_seq*n_state, n_seq*n_state)
     x_var = jnp.linalg.inv(x_hes)
     # approximate conditional by MVN

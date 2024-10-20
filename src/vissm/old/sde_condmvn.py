@@ -3,7 +3,6 @@ import jax.numpy as jnp
 import rodeo.kalmantv
 import equinox as eqx
 
-
 def theta_to_chol(theta_lower, n_theta):
     lower_ind = jnp.tril_indices(n_theta)
     diag_ind = jnp.diag_indices(n_theta)
@@ -50,8 +49,8 @@ class NN(eqx.Module):
      
     def __init__(self, key, n_state):
         key, *subkey = jax.random.split(key, num=6)
-        self.out_size = n_state + n_state*(n_state + 1)//2
-        n_inp = n_state*n_state + 2*n_state + n_state*(n_state + 1)//2
+        self.out_size = n_state*(n_state + 1)*3//2
+        n_inp = self.out_size + n_state
         self.hidden_size = 50
         self.layers = [
             eqx.nn.Linear(n_inp, self.hidden_size, key=subkey[0]),
@@ -123,7 +122,7 @@ class SmoothModel:
         upper_ind = jnp.triu_indices(self._n_state)
         diag_ind = jnp.diag_indices(self._n_state)
         chol_state_filt = jnp.zeros((self._n_state, self._n_state, self._n_sde))
-        chol_state_filt = chol_state_filt.at[upper_ind].set(full_par[:, par_indices[2]:par_indices[3]].T)*0.1
+        chol_state_filt = chol_state_filt.at[upper_ind].set(full_par[:, par_indices[2]:par_indices[3]].T)
         chol_state_filt = chol_state_filt.at[diag_ind].set(jax.nn.softplus(chol_state_filt[diag_ind])).T
         chol_state = jnp.zeros((self._n_state, self._n_state, self._n_sde))
         chol_state = chol_state.at[upper_ind].set(full_par[:, par_indices[3]:par_indices[4]].T)
@@ -144,7 +143,6 @@ class SmoothModel:
             var_state=var_state
         )
         return mean_state_filt, var_state_filt, mean_state_pred, var_state_pred, wgt_state
-
 
     def simulate(self, key, params, y_meas):
         key, subkey = jax.random.split(key)
@@ -186,10 +184,12 @@ class SmoothModel:
             chol_back = jnp.linalg.cholesky(var_state_back)
             nn_input = jnp.concatenate([wgt_state_back.flatten(), mean_state_back, chol_back[lower_ind], x_state_next])
             nn_output = nn_model(nn_input)
-            mean_state_curr = nn_output[:self._n_state] + self._x_init
-            chol_curr = jnp.zeros((self._n_state, self._n_state))
-            chol_curr = chol_curr.at[lower_ind].set(nn_output[self._n_state:])
-            chol_curr = chol_curr.at[diag_ind].set(jax.nn.softplus(chol_curr[diag_ind]))
+            wgt_state_back = nn_output[:self._n_state*self._n_state].reshape((self._n_state, self._n_state))
+            mean_state_back = nn_output[self._n_state*self._n_state:self._n_state*(self._n_state + 1)] + self._x_init
+            chol_back = jnp.zeros((self._n_state, self._n_state))
+            chol_back = chol_back.at[lower_ind].set(nn_output[self._n_state*(self._n_state + 1):])
+            chol_curr = chol_back.at[diag_ind].set(jax.nn.softplus(chol_back[diag_ind]))
+            mean_state_curr = mean_state_back + wgt_state_back.dot(x_state_next)
             var_state_curr = chol_curr.dot(chol_curr.T)
             x_state_curr = mean_state_curr + chol_curr.dot(random_normal) 
             x_neglogpdf -= jax.scipy.stats.multivariate_normal.logpdf(x_state_curr, mean_state_curr, var_state_curr)

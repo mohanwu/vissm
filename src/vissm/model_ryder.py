@@ -20,9 +20,12 @@ import equinox as eqx
 
 def theta_to_chol(theta_lower, n_theta):
     lower_ind = jnp.tril_indices(n_theta)
+    diag_ind = jnp.diag_indices(n_theta)
     theta_chol = jnp.zeros((n_theta, n_theta))
     theta_chol = theta_chol.at[lower_ind].set(theta_lower)
+    theta_chol = theta_chol.at[diag_ind].set(jax.nn.softplus(jnp.diag(theta_chol)))
     return theta_chol
+
 
 # Smooth model
 class RyderNN(eqx.Module):
@@ -59,37 +62,35 @@ class RyderNN(eqx.Module):
 
 class Ryder:
 
-    def __init__(self, n_state, obs_times, sde_times, x_init, obs_mat):
+    def __init__(self, n_state, obs_times, sde_times, x_init, obs_mat, restrict=False):
         self._n_state = n_state
         self._obs_times = obs_times
         self._sde_times = sde_times
         self._dt = sde_times[1] - sde_times[0]
         self._x_init = x_init
         self._obs_mat = obs_mat
+        self._restrict = restrict
     
     def _nn_input(self, theta, y_meas):
         theta_rep = jnp.repeat(theta[None], len(self._sde_times)-1, axis=0)
         obs_ind = jnp.searchsorted(self._obs_times, self._sde_times[:-1], side='right')
         time_next = self._obs_times[obs_ind]
         time_diff = time_next - self._sde_times[:-1]
-        # y_meas_comb = jnp.hstack([y_meas[:-1], y_meas[1:]])
-        # y_meas_prev_next = y_meas_comb[obs_ind-1]
         y_meas_next = y_meas[obs_ind]
         input = jnp.concatenate([theta_rep, self._sde_times[:-1, None], time_diff[:, None], y_meas_next], axis=1)
         return input
     
 
-    # NN(x_{i-1}, input, y_j) -> x_i
-    # x_i, y_j - x_i, F?
     def simulate(self, key, params, y_meas):
         key, subkey = jax.random.split(key)
         nn_model = params["nn"]
         theta_mu = params["theta_mu"]
         n_theta = len(theta_mu)
-        theta_std = jax.nn.softplus(params["theta_std"])
+        # theta_std = jax.nn.softplus(params["theta_std"])
         random_normal = jax.random.normal(subkey, shape=(n_theta,))
-        theta = theta_mu + theta_std*random_normal
-        # theta = jnp.exp(theta)
+        # theta = theta_mu + theta_std*random_normal
+        theta_chol = theta_to_chol(params["theta_chol"], n_theta)
+        theta = theta_mu + theta_chol.dot(random_normal)
         nn_input = self._nn_input(theta, y_meas)
         lower_ind = jnp.tril_indices(self._n_state)
         diag_ind = jnp.diag_indices(self._n_state)
@@ -109,10 +110,13 @@ class Ryder:
             beta = beta_lower.dot(beta_lower.T)
             beta_lower = jnp.linalg.cholesky(beta)
             x_curr_untrans = x_prev + alpha * self._dt + beta_lower.dot(random_normal) * jnp.sqrt(self._dt)
-            # x_curr = jax.nn.softplus(x_curr_untrans)
+            if self._restrict:
+                x_curr = jax.nn.softplus(x_curr_untrans) # necessary if x > 0 is a restriction
+            else:
+                x_curr = x_curr_untrans
             x_neglogpdf -= jax.scipy.stats.multivariate_normal.logpdf(x_curr_untrans, x_prev + alpha * self._dt, beta * self._dt)
             carry = {
-                'x_curr': x_curr_untrans,
+                'x_curr': x_curr,
                 'x_neglogpdf': x_neglogpdf
             }
             return carry, carry
@@ -141,8 +145,9 @@ class Ryder:
         # use entropy for - E[log q(theta)]
         # use negative logpdf for - E[log q(x|theta)]
         x_neglogpdf = last_out["x_neglogpdf"]
-        # theta_entpy = 0.5*n_theta*(1+jnp.log(2*jnp.pi)) + jnp.sum(jnp.log(jnp.diag(theta_chol)))
-        theta_entpy = 0.5*n_theta*(1+jnp.log(2*jnp.pi)) + jnp.sum(jnp.log(theta_std))
+        theta_entpy = 0.5*n_theta*(1+jnp.log(2*jnp.pi)) + jnp.sum(jnp.log(jnp.diag(theta_chol)))
+        # theta_entpy = -jax.scipy.stats.multivariate_normal.logpdf(theta, theta_mu, theta_chol.dot(theta_chol.T))
+        # theta_entpy = 0.5*n_theta*(1+jnp.log(2*jnp.pi)) + jnp.sum(jnp.log(theta_std))
         theta_x_neglogpdf = x_neglogpdf + theta_entpy
         return (xs, theta), theta_x_neglogpdf
 

@@ -4,18 +4,22 @@ import rodeo.kalmantv
 import equinox as eqx
 from vissm.block_tridiag import *
 
+
 def theta_to_chol(theta_lower, n_theta):
     lower_ind = jnp.tril_indices(n_theta)
+    diag_ind = jnp.diag_indices(n_theta)
     theta_chol = jnp.zeros((n_theta, n_theta))
     theta_chol = theta_chol.at[lower_ind].set(theta_lower)
+    theta_chol = theta_chol.at[diag_ind].set(jax.nn.softplus(jnp.diag(theta_chol)))
     return theta_chol
 
 # # archer model
 
 class ArcherModel:
-    def __init__(self, n_state, n_res):
+    def __init__(self, n_state, n_res, x_init):
         self._n_state = n_state
         self._n_res = n_res
+        self._x_init = x_init
 
     def _y_meas_comb(self, y_meas):
         n_obs = len(y_meas)
@@ -50,7 +54,6 @@ class ArcherModel:
         theta_mu = params["theta_mu"]
         n_theta = len(theta_mu)
         theta_chol = theta_to_chol(params["theta_chol"], n_theta)
-        theta_chol = theta_chol.at[jnp.diag_indices(n_theta)].set(jax.nn.softplus(jnp.diag(theta_chol)))
         random_normal = jax.random.normal(subkey, shape=(n_theta,))
         theta = theta_mu + theta_chol.dot(random_normal)
         theta_rep = jnp.repeat(theta[None], self._n_sde, axis=0)
@@ -148,7 +151,6 @@ class SmoothModel:
         theta_mu = params["theta_mu"]
         n_theta = len(theta_mu)
         # theta_chol = theta_to_chol(params["theta_chol"], n_theta)
-        # theta_chol = theta_chol.at[jnp.diag_indices(n_theta)].set(jax.nn.softplus(jnp.diag(theta_chol)))
         theta_std = jax.nn.softplus(params["theta_std"])
         random_normal = jax.random.normal(subkey, shape=(n_theta,))
         # theta = theta_mu + theta_chol.dot(random_normal)
